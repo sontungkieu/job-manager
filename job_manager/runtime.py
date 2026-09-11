@@ -23,6 +23,35 @@ def proc_ticks(pid):
         return None
 
 
+def track_descendants(known):
+    """Keep observed child identities, including children that create sessions."""
+    table = {}
+    for path in Path('/proc').iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            fields = (path/'stat').read_text().rsplit(')', 1)[1].split()
+            table[int(path.name)] = (int(fields[1]), fields[19])
+        except (OSError, IndexError, ValueError):
+            pass
+    changed = True
+    while changed:
+        changed = False
+        for pid, (parent, ticks) in table.items():
+            if parent in known and pid not in known and table.get(parent, (None, None))[1] == known[parent]:
+                known[pid] = ticks
+                changed = True
+
+
+def signal_known(known, sig):
+    for pid, ticks in reversed(list(known.items())):
+        if ticks is not None and proc_ticks(pid) == ticks:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+
+
 def alive(row):
     return bool(row["pid"] and row["boot_id"] == boot_id() and row["start_ticks"] == proc_ticks(row["pid"]))
 
@@ -38,30 +67,36 @@ def lock_file(path):
         raise
 
 
-def terminate_group(process, grace):
+def terminate_group(process, grace, known=None):
     # Each payload owns a fresh POSIX session. Ray and normal subprocess children
     # inherit the group; daemonizing/set-session children are outside this backend.
+    known = known or {}
+    track_descendants(known)
+    signal_known(known, signal.SIGTERM)
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        pass
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         process.poll()
         try:
             os.killpg(process.pid, 0)
         except ProcessLookupError:
-            return
+            if not any(proc_ticks(pid) == ticks for pid, ticks in known.items()):
+                return
         time.sleep(0.05)
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    signal_known(known, signal.SIGKILL)
 
 
 def worker(root, job_id, token, lease_fds):
     db = connect(root)
     process = None
+    known = {}
     signalled = False
     def stop(*_):
         nonlocal signalled
@@ -100,8 +135,10 @@ def worker(root, job_id, token, lease_fds):
                 try:
                     process = subprocess.Popen(spec["argv"], cwd=spec["cwd"], env=env,
                                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                    known[process.pid] = proc_ticks(process.pid)
                     event(db, job_id, "payload_started", {"pid": process.pid})
                     while True:
+                        track_descendants(known)
                         now = time.time()
                         row = db.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()
                         rc = process.poll()
@@ -121,7 +158,7 @@ def worker(root, job_id, token, lease_fds):
                     status, reason = "failed", f"launch failed: {type(exc).__name__}: {exc}"
                 finally:
                     if process is not None:
-                        terminate_group(process, config["kill_grace_seconds"])
+                        terminate_group(process, config["kill_grace_seconds"], known)
                         rc = process.wait()
             with transaction(db):
                 db.execute("UPDATE jobs SET status=?,reason=?,returncode=?,ended=?,heartbeat=? WHERE id=?",
@@ -133,7 +170,7 @@ def worker(root, job_id, token, lease_fds):
         raise
     finally:
         if process is not None and process.poll() is None:
-            terminate_group(process, 1)
+            terminate_group(process, 1, known)
             process.wait()
         db.close()
         for fd in lease_fds:

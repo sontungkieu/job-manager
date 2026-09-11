@@ -182,6 +182,14 @@ class QueueTest(unittest.TestCase):
         cancel(self.db, "a")
         self.wait("a", {"cancelled"})
 
+    def test_timeout_kills_observed_child_in_separate_session(self):
+        code = "import subprocess,time; p=subprocess.Popen(['sleep','20'],start_new_session=True); print(p.pid,flush=True); time.sleep(20)"
+        submit(self.db, [self.spec(code=code, timeout_seconds=1)])
+        self.dispatch(); self.wait("a", {"timeout"})
+        pid = int((self.root/'logs/a.log').read_text().strip())
+        from job_manager.runtime import proc_ticks
+        self.assertIsNone(proc_ticks(pid))
+
     def test_cpu_slot_limit(self):
         submit(self.db, [self.spec("a", code="import time; time.sleep(.4)", cpu_slots=2), self.spec("b")])
         self.dispatch()
