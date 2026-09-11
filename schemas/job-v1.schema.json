@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sontungkieu/job-manager/blob/main/schemas/job-v1.schema.json",
+  "title": "Job Manager job contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "argv", "cwd", "timeout_seconds"],
+  "properties": {
+    "version": {"type": "integer", "const": 1},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"},
+    "project": {"type": "string"},
+    "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "cwd": {"type": "string", "pattern": "^/"},
+    "env": {"type": "object", "additionalProperties": {"type": "string"}},
+    "gpus": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "array", "uniqueItems": true, "items": {"type": "string"}}]},
+    "cpu_slots": {"type": "integer", "minimum": 1},
+    "timeout_seconds": {"type": "number", "minimum": 0.01},
+    "not_before": {"type": "number", "minimum": 0},
+    "deadline": {"type": "number", "minimum": 0},
+    "dependencies": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"}},
+    "dependency_policy": {"enum": ["success", "terminal"]},
+    "require_full_budget": {"type": "boolean"},
+    "metadata": {"type": "object"}
+  }
+}

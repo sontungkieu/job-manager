@@ -1,0 +1,21 @@
+[
+  {
+    "version": 1,
+    "id": "hello",
+    "project": "demo",
+    "argv": ["/usr/bin/env", "python3", "-c", "import time; print('hello from worker', flush=True); time.sleep(2)"],
+    "cwd": "/tmp",
+    "gpus": 0,
+    "timeout_seconds": 10
+  },
+  {
+    "version": 1,
+    "id": "validate",
+    "project": "demo",
+    "argv": ["/usr/bin/env", "python3", "-c", "print('dependency completed')"],
+    "cwd": "/tmp",
+    "gpus": 0,
+    "timeout_seconds": 10,
+    "dependencies": ["hello"]
+  }
+]
