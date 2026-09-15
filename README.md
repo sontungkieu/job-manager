@@ -2,7 +2,7 @@
 
 A durable, project-independent queue for **one Linux host with multiple NVIDIA GPUs**. Submit and reorder jobs while it runs; keep CPU scoring independent of GPU training; measure utilization without calling every quiet GPU a failed job.
 
-**Status: v0.1.0, initial implementation.** CPU process integration and GPU admission/telemetry logic are tested. Real multi-GPU training and the SimCT migration have not been qualified with this manager. Existing campaigns are not adopted or modified.
+**Status: v0.2.0.** CPU process integration and GPU admission/telemetry logic are tested. Real multi-GPU training and the SimCT migration have not been qualified with this manager. Existing campaigns are not adopted or modified.
 
 Python **3.10+**, standard library only. No daemon installation, Docker, database server, pip install, or model downloads required. On Windows, execute through WSL.
 
@@ -51,7 +51,7 @@ The timestamp above is a placeholder: replace it with your authorized **absolute
 | `remove job-id` | Remove a queued job from execution, retaining its cancelled record and audit history |
 | `cancel job-id` | Cancel queued work or request active worker termination, with bounded TERM → KILL grace |
 | `pause` / `resume` | Pause/resume admission; active workers continue within their deadlines |
-| `status` | JSON status with waiting reasons, queue time, runtime, progress and quarantine flag |
+| `status [--project NAME] [--ids ID ...]` | Capture time, dependency policy and filtered jobs; queue health/quarantine remain global |
 | `logs job-id --follow` | Tail payload stdout/stderr; supervisor errors are in `logs/ID.supervisor.log` |
 | `events --after 0 --limit 100` | Ordered audit events; use the last `seq` as the next cursor |
 | `progress job-id '{"step":20,"target":50,"phase":"train"}'` | Publish application progress from a running job |

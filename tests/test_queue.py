@@ -60,6 +60,28 @@ class QueueTest(unittest.TestCase):
             submit(self.db, [self.spec("a", dependencies=["b"]), self.spec("b", dependencies=["a"])])
         self.assertEqual(rows(self.db), [])
 
+    def test_filtered_status_preserves_global_quarantine_and_hides_specs(self):
+        submit(self.db, [self.spec('old', project='other'),
+                         self.spec('new', project='campaign', dependency_policy='terminal')])
+        self.db.execute("UPDATE jobs SET status='lost' WHERE id='old'")
+        result = snapshot(self.db, project='campaign', ids=['new'])
+        self.assertTrue(result['quarantined'])
+        self.assertEqual([j['id'] for j in result['jobs']], ['new'])
+        self.assertEqual(result['jobs'][0]['dependency_policy'], 'terminal')
+        self.assertNotIn('argv', result['jobs'][0])
+        self.assertNotIn('env', result['jobs'][0])
+        self.assertGreater(result['generated_at'], 0)
+        self.assertEqual(snapshot(self.db, project='absent')['jobs'], [])
+        with self.assertRaisesRegex(ValueError, 'unknown job IDs: missing'):
+            snapshot(self.db, ids=['missing'])
+
+    def test_status_filter_cli(self):
+        submit(self.db, [self.spec('a', project='campaign'), self.spec('b', project='other')])
+        result = subprocess.run([sys.executable, '-m', 'job_manager', '--state', str(self.root),
+                                 'status', '--project', 'campaign', '--ids', 'a'],
+                                check=True, capture_output=True, text=True)
+        self.assertEqual([j['id'] for j in json.loads(result.stdout)['jobs']], ['a'])
+
     def test_unknown_dependency_and_duplicate(self):
         with self.assertRaisesRegex(ValueError, "unknown dependency"):
             submit(self.db, [self.spec(dependencies=["missing"])])
