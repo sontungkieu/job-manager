@@ -27,8 +27,15 @@ def report(db, start=None, end=None):
     return result
 
 
-def snapshot(db):
+def snapshot(db, project=None, ids=None):
     all_jobs = rows(db)
+    requested = set(ids or [])
+    missing = requested - {j['id'] for j in all_jobs}
+    if missing:
+        raise ValueError('unknown job IDs: ' + ', '.join(sorted(missing)))
+    selected = [j for j in all_jobs
+                if (project is None or j['spec'].get('project') == project)
+                and (not requested or j['id'] in requested)]
     now = time.time()
     from .runtime import alive
     manager_row = db.execute("SELECT value FROM settings WHERE key='manager'").fetchone()
@@ -36,16 +43,17 @@ def snapshot(db):
     manager_status = {"running": bool(manager and not manager["stopped"] and alive(manager)),
                       "last_tick_at": manager.get("last_tick_at") if manager else None}
     manager_status["tick_age_seconds"] = now-manager["last_tick_at"] if manager else None
-    return {"manager": manager_status, "paused": setting(db, "paused"), "deadline": setting(db, "config").get("deadline"),
+    return {"generated_at": now, "manager": manager_status, "paused": setting(db, "paused"), "deadline": setting(db, "config").get("deadline"),
             "quarantined": any(j["status"] == "lost" for j in all_jobs),
             "jobs": [{k: j[k] for k in ("id", "status", "position", "created", "started", "ended", "returncode", "reason", "assigned", "heartbeat", "progress")}
                      | {"project": j["spec"].get("project"),
                         "dependencies": j["spec"].get("dependencies", []),
+                        "dependency_policy": j["spec"].get("dependency_policy", "success"),
                         "not_before": j["spec"].get("not_before"),
                         "cancel_requested": bool(j["cancel_requested"]),
                         "queue_wait_seconds": (j["started"] or j["ended"] or now) - j["created"],
                         "runtime_seconds": (j["ended"] or now) - j["started"] if j["started"] else None}
-                     for j in all_jobs]}
+                     for j in selected]}
 
 
 def serve(root, port):
@@ -102,7 +110,9 @@ def parser():
     s.add_argument("file", help="JSON job or array; '-' reads stdin")
     run = commands.add_parser("run")
     run.add_argument("--once", action="store_true", help="one scheduling tick; workers continue")
-    commands.add_parser("status")
+    status = commands.add_parser("status")
+    status.add_argument('--project', help='exact project filter; queue health remains global')
+    status.add_argument('--ids', nargs='+', help='exact job IDs from an application receipt')
     commands.add_parser("pause")
     commands.add_parser("resume")
     r = commands.add_parser("reorder")
@@ -181,7 +191,7 @@ def main(argv=None):
             submit(db, specs)
             result = {"submitted": [s["id"] for s in specs]}
         elif args.command == "status":
-            result = snapshot(db)
+            result = snapshot(db, args.project, args.ids)
         elif args.command in ("pause", "resume"):
             with transaction(db):
                 db.execute("UPDATE settings SET value=? WHERE key='paused'", (json.dumps(args.command == "pause"),))
