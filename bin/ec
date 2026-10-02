@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""eval-core CLI (draft B1). Chi doc/ghi file JSON; khong can GPU, khong can venv rieng.
+"""eval-core CLI (v0.2). File-based, multi-machine, per-checkpoint.
 
-    ec add  --case <dir> --run R [--steps 40..312|40,80] [--bench all|gsm8k] [--seeds 42,43] [--force]
-    ec status
-    ec why <job-id>
-    ec gc --older-than 2h
+    ec host --gpus 0,1,3
+    ec add --case <dir> --run R --steps 40..312 --bench all --seeds 42,43,44
+    ec status | ec why <job> | ec beat <job> | ec gc --older-than 20m
     ec bank ls|import <case>/eval|verify
 """
-import argparse, datetime, hashlib, json, os, pathlib, time
+import argparse, datetime, hashlib, json, os, pathlib, socket, time
 
 ROOT = pathlib.Path(os.environ.get("EC_ROOT", "/workspace/storage-shared/nlp/tungks/eval-core"))
-Q, BANK, LOCKS, RUN, ENVF = ROOT/"queue", ROOT/"bank", ROOT/"locks", ROOT/"run", ROOT/"env"
+HOST = os.environ.get("EC_HOST") or socket.gethostname().split(".")[0]
+Q, BANK, LOCKS, RUN = ROOT/"queue", ROOT/"bank", ROOT/"locks", ROOT/"run"
+HOSTS, BEAT = ROOT/"hosts", ROOT/"heartbeats"
 BENCHES = ["gsm8k", "math500", "mbpp", "live-code-bench-v6"]
 
 def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -19,18 +20,44 @@ def jload(p, d=None):
     except Exception: return d
 def jdump(p, o):
     p = pathlib.Path(p); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(o, indent=2) + chr(10))
-
+def host_gpus():
+    return [int(g) for g in (jload(HOSTS / (HOST + ".json"), {}) or {}).get("gpus", [])]
 def env_fp():
     import platform
-    fp = {"python": platform.python_version(), "impl": platform.python_implementation()}
-    for mod in ("numpy", "sympy"):
-        try: fp[mod] = __import__(mod).__version__
-        except Exception: fp[mod] = None
-    root = pathlib.Path("/workspace/storage-shared/nlp/tungks")
-    for p in sorted(root.glob("simct-b200-portable*/scripts/evaluation/contract_eval.py")):
+    fp = {"python": platform.python_version()}
+    for m in ("numpy", "sympy"):
+        try: fp[m] = __import__(m).__version__
+        except Exception: fp[m] = None
+    glob = "/workspace/storage-shared/nlp/tungks"
+    for p in sorted(pathlib.Path(glob).glob("simct-b200-portable*/scripts/evaluation/contract_eval.py")):
         fp["contract_sha"] = hashlib.sha256(p.read_bytes()).hexdigest()[:12]; break
     return fp
-
+def ckpt_sha(case, run, step):
+    base = pathlib.Path(case) / "train" / run / "checkpoint"
+    for cand in (base / ("step" + str(step)), base):
+        if cand.is_dir():
+            files = sorted(f for f in cand.rglob("*") if f.is_file() and f.suffix in (".safetensors", ".json", ".bin"))
+            if files:
+                h = hashlib.sha256()
+                for f in files[:64]:
+                    h.update(f.name.encode()); h.update(str(f.stat().st_size).encode())
+                return h.hexdigest()[:24]
+    return "unknown:" + run + ":" + str(step)
+def bank_index():
+    f = BANK / "index.jsonl"
+    if not f.is_file(): return []
+    out = []
+    for line in f.read_text().splitlines():
+        try: out.append(json.loads(line))
+        except Exception: pass
+    return out
+def bank_lookup(ck, bench, seed):
+    for r in bank_index():
+        if (r.get("ckpt_sha"), r.get("benchmark"), r.get("seed")) == (ck, bench, seed): return r
+    return None
+def cell_paths(case, run, step, bench, seed):
+    d = pathlib.Path(case) / "eval" / ("%s-step%d" % (run, step)) / "cells"
+    return sorted(str(p) for p in d.glob("*/%s/%d" % (bench, seed)))
 def parse_steps(s):
     out = []
     for part in s.split(","):
@@ -40,88 +67,90 @@ def parse_steps(s):
         else: out.append(int(part))
     return sorted(set(out))
 
-def bank_index():
-    f = BANK / "index.jsonl"
-    if not f.is_file(): return []
-    out = []
-    for line in f.read_text().splitlines():
-        try: out.append(json.loads(line))
-        except Exception: pass
-    return out
-
-def bank_lookup(run, step, bench, seed):
-    for r in bank_index():
-        if (r.get("run"), r.get("step"), r.get("benchmark"), r.get("seed")) == (run, step, bench, seed): return r
-    return None
+def cmd_host(a):
+    jdump(HOSTS / (HOST + ".json"), {"host": HOST, "gpus": [int(x) for x in a.gpus.split(",")], "declared": now()})
+    print("host", HOST, "gpus", a.gpus)
 
 def cmd_add(a):
     steps = parse_steps(a.steps) if a.steps else []
     benches = BENCHES if a.bench == "all" else a.bench.split(",")
     seeds = [int(x) for x in a.seeds.split(",")] if a.seeds else [42, 43, 44]
-    made, skipped = [], []
+    made = skip_bank = skip_cell = 0
+    print("host", HOST, "gpus", host_gpus())
     for st in steps:
+        ck = ckpt_sha(a.case, a.run, st)
         for b in benches:
             for sd in seeds:
-                hit = bank_lookup(a.run, st, b, sd)
-                if hit and not a.force: skipped.append((a.run, st, b, sd, hit.get("env_fp"))); continue
                 jid = "gen__%s__step%d__%s__seed%d" % (a.run, st, b, sd)
-                plan = str(pathlib.Path(a.case) / "eval" / ("%s-step%d" % (a.run, st)) / "plan.json")
-                job = {"id": jid, "type": "gen", "case": str(pathlib.Path(a.case)), "run": a.run,
-                       "step": st, "benchmark": b, "seed": sd, "gen_seed": 0,
-                       "needs": {"gpu": 1, "vram_gb": 140},
-                       "engine": {"plan": plan, "cmd": "eval_queue.py worker --plan <plan> --gpu <N> --phase generate"},
-                       "bank_key": "pending:" + jid, "prio": 50, "created": now(), "by": "ec add",
-                       "claimed_by": None, "claimed_at": None}
-                jdump(Q / "pending" / (jid + ".json"), job); made.append(jid)
-    print("PENDING += %d | SKIP (bank da co) = %d" % (len(made), len(skipped)))
-    for r in skipped[:6]: print("  skip", r)
+                if (Q / "pending" / (jid + ".json")).is_file() or (Q / "claimed" / (jid + ".json")).is_file(): continue
+                if bank_lookup(ck, b, sd) and not a.force: skip_bank += 1; continue
+                cells = cell_paths(a.case, a.run, st, b, sd)
+                if cells and any((pathlib.Path(c) / "generation-complete.json").is_file() for c in cells) and not a.force:
+                    skip_cell += 1; continue
+                jdump(Q / "pending" / (jid + ".json"), {"id": jid, "type": "gen", "case": str(a.case),
+                    "run": a.run, "step": st, "ckpt_sha": ck, "benchmark": b, "seed": sd, "gen_seed": 0,
+                    "cells": cells, "hosts_ok": host_gpus(), "needs": {"gpu": 1, "vram_gb": 140},
+                    "engine": {"plan": str(pathlib.Path(a.case) / "eval" / ("%s-step%d" % (a.run, st)) / "plan.json")},
+                    "bank_key": "pending:" + jid, "prio": 50, "created": now(), "by": "ec add@" + HOST,
+                    "claimed_by": None, "claimed_at": None})
+                made += 1
+    print("PENDING += %d | skip bank %d | skip cell da sinh %d" % (made, skip_bank, skip_cell))
 
 def cmd_status(a):
     rows = {}
     for state in ("pending", "claimed", "done", "failed"):
         for f in (Q / state).glob("*.json"):
             j = jload(f, {}) or {}
-            rows.setdefault((j.get("run"), j.get("step")), {}).setdefault(state, 0)
-            rows[(j.get("run"), j.get("step"))][state] += 1
+            k = (j.get("run"), j.get("step"))
+            rows.setdefault(k, {})[state] = rows.setdefault(k, {}).get(state, 0) + 1
     print("%-18s %5s %8s %8s %6s %7s" % ("run", "step", "pending", "claimed", "done", "failed"))
     for k in sorted(rows, key=lambda x: (str(x[0]), x[1] or 0)):
         r = rows[k]
         print("%-18s %5s %8d %8d %6d %7d" % (k[0], k[1], r.get("pending", 0), r.get("claimed", 0), r.get("done", 0), r.get("failed", 0)))
     print("TONG:", {s: len(list((Q / s).glob("*.json"))) for s in ("pending", "claimed", "done", "failed")})
+    mine = host_gpus()
+    print("MAY NAY:", HOST, "gpus", mine if mine else "(chua khai bao: ec host --gpus ...)")
+    by_host = {}
+    for f in (Q / "claimed").glob("*.json"):
+        h = ((jload(f, {}) or {}).get("claimed_by") or "?").split(":")[0]
+        by_host[h] = by_host.get(h, 0) + 1
+    if by_host: print("dang giu job theo may:", by_host)
 
 def cmd_why(a):
     for state in ("pending", "claimed", "done", "failed"):
         p = Q / state / (a.job + ".json")
-        if p.is_file():
-            j = jload(p, {}) or {}
-            print("job:", a.job, "| state:", state, "| type:", j.get("type"))
-            plan = pathlib.Path(j.get("engine", {}).get("plan", ""))
-            if not plan.is_file():
-                print("  LY DO: thieu plan ->", plan); return
-            st = jload(plan.with_name("state.json"))
-            if not st: print("  LY DO: plan chua chay lan nao (khong co state.json)"); return
-            qual = st.get("qualification")
-            cur = env_fp()
-            drift = [k for k in ("numpy", "sympy", "python") if qual and any(isinstance(q, dict) and q.get(k) not in (None, cur.get(k)) for q in qual)]
-            print("  LY DO:", ("DRIFT moi truong cham: " + ",".join(drift)) if drift else "khong thay van de; xem run/<id>/")
-            print("  log:", RUN / a.job, "| plan:", plan)
-            return
+        if not p.is_file(): continue
+        j = jload(p, {}) or {}
+        print("job:", a.job, "| state:", state, "| host", (j.get("claimed_by") or "-"))
+        plan = pathlib.Path((j.get("engine") or {}).get("plan", ""))
+        if not plan.is_file(): print("  LY DO: thieu plan ->", plan); return
+        st = jload(plan.with_name("state.json"))
+        if not st: print("  LY DO: plan chua chay lan nao"); return
+        cur, qual = env_fp(), st.get("qualification")
+        drift = [k for k in ("numpy", "sympy", "python")
+                 if qual and any(isinstance(q, dict) and q.get(k) not in (None, cur.get(k)) for q in qual)]
+        print("  LY DO:", ("DRIFT moi truong: " + ",".join(drift)) if drift else "khong thay van de; xem run/" + a.job)
+        return
     print("khong thay job", a.job)
 
+def cmd_beat(a):
+    BEAT.mkdir(parents=True, exist_ok=True); (BEAT / a.job).touch(); print("beat", a.job, now())
+
 def cmd_gc(a):
-    hours = float(a.older_than[:-1]) if a.older_than.endswith("h") else 2.0
-    limit = time.time() - hours * 3600
+    unit = 1.0 if a.older_than.endswith("h") else 1.0/60
+    limit = time.time() - float(a.older_than[:-1]) * unit * 3600
     moved = 0
     for f in (Q / "claimed").glob("*.json"):
-        if f.stat().st_mtime < limit:
+        beat = BEAT / f.stem
+        if (beat.stat().st_mtime if beat.is_file() else f.stat().st_mtime) < limit:
             j = jload(f, {}) or {}; j["claimed_by"] = None; j["claimed_at"] = None
             jdump(Q / "pending" / f.name, j); f.unlink(); moved += 1
-    print("gc: tra ve pending", moved, "job (qua han", a.older_than, ")")
+    print("gc: tra ve pending", moved, "job")
 
 def cmd_bank(a):
     if a.action == "ls":
         idx = bank_index(); print("bank entries:", len(idx))
-        for r in idx[:8]: print("  ", r.get("run"), r.get("step"), r.get("benchmark"), r.get("seed"), r.get("score"), "env_fp", r.get("env_fp"))
+        for r in idx[:6]: print("  ", r.get("ckpt_sha"), r.get("benchmark"), r.get("seed"), r.get("score"), "env", r.get("env_fp"))
     elif a.action == "import":
         n = 0
         for m in sorted(pathlib.Path(a.target).glob("**/metrics.json")):
@@ -133,32 +162,38 @@ def cmd_bank(a):
             try:
                 i = parts.index("cells"); bench = parts[i + 2]; seed = int(parts[i + 3])
             except Exception: bench, seed = "?", None
+            ck = ckpt_sha(m.parents[5] if len(m.parents) > 5 else ".", run, step) if step is not None else "?"
             owner = next((p for p in m.parents if (p / "state.json").is_file()), None)
             envfp = "unknown:imported"
             if owner:
                 q = (jload(owner / "state.json", {}) or {}).get("qualification")
                 if q: envfp = "unknown:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:12]
-            key = hashlib.sha256("|".join([str(run), str(step), str(bench), str(seed), envfp]).encode()).hexdigest()[:32]
-            ent = {"key": key, "kind": "score", "run": run, "step": step, "benchmark": bench, "seed": seed,
-                   "score": d.get("score"), "count": d.get("count"), "truncated_fraction": d.get("truncated_fraction"),
-                   "contract_sha": str(d.get("contract"))[:12], "env_fp": envfp, "source": str(m), "created": now()}
+            key = hashlib.sha256("|".join([ck, str(bench), str(seed), envfp]).encode()).hexdigest()[:32]
+            ent = {"key": key, "kind": "score", "ckpt_sha": ck, "run": run, "step": step, "benchmark": bench,
+                   "seed": seed, "score": d.get("score"), "count": d.get("count"),
+                   "truncated_fraction": d.get("truncated_fraction"), "contract_sha": str(d.get("contract"))[:12],
+                   "env_fp": envfp, "source": str(m), "created": now(), "host": HOST}
             jdump(BANK / "entries" / (key + ".json"), ent)
             with (BANK / "index.jsonl").open("a") as fh: fh.write(json.dumps(ent) + chr(10))
             n += 1
-        print("bank import: +", n, "entry tu", a.target)
+        print("bank import: +", n, "entry")
     else:
-        bad = [1 for line in (BANK / "index.jsonl").read_text().splitlines() if "env_fp" not in line] if (BANK / "index.jsonl").is_file() else []
-        print("verify:", "OK" if not bad else "%d entry thieu env_fp" % len(bad))
+        lines = (BANK / "index.jsonl").read_text().splitlines() if (BANK / "index.jsonl").is_file() else []
+        bad = [1 for l in lines if "ckpt_sha" not in l or "env_fp" not in l]
+        print("verify:", "OK" if not bad else "%d entry thieu ckpt_sha/env_fp" % len(bad))
 
 def main():
     ap = argparse.ArgumentParser(prog="ec"); sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("host"); p.add_argument("--gpus", required=True); p.set_defaults(func=cmd_host)
     p = sub.add_parser("add"); p.add_argument("--case", required=True); p.add_argument("--run", required=True)
     p.add_argument("--steps"); p.add_argument("--bench", default="all"); p.add_argument("--seeds")
     p.add_argument("--force", action="store_true"); p.set_defaults(func=cmd_add)
     p = sub.add_parser("status"); p.set_defaults(func=cmd_status)
     p = sub.add_parser("why"); p.add_argument("job"); p.set_defaults(func=cmd_why)
-    p = sub.add_parser("gc"); p.add_argument("--older-than", default="2h"); p.set_defaults(func=cmd_gc)
-    p = sub.add_parser("bank"); p.add_argument("action", choices=["ls", "import", "verify"]); p.add_argument("target", nargs="?"); p.set_defaults(func=cmd_bank)
+    p = sub.add_parser("beat"); p.add_argument("job"); p.set_defaults(func=cmd_beat)
+    p = sub.add_parser("gc"); p.add_argument("--older-than", default="20m"); p.set_defaults(func=cmd_gc)
+    p = sub.add_parser("bank"); p.add_argument("action", choices=["ls", "import", "verify"])
+    p.add_argument("target", nargs="?"); p.set_defaults(func=cmd_bank)
     a = ap.parse_args(); a.func(a)
 
 if __name__ == "__main__": main()
