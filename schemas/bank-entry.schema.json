@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eval-core bank entry",
+  "type": "object",
+  "required": [
+    "key",
+    "score",
+    "kind",
+    "created"
+  ],
+  "properties": {
+    "key": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "gen+score",
+        "score",
+        "judge"
+      ]
+    },
+    "case": {
+      "type": "string"
+    },
+    "run": {
+      "type": "string"
+    },
+    "step": {
+      "type": "integer"
+    },
+    "benchmark": {
+      "type": "string"
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "score": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "count": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "truncated_fraction": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "contract_sha": {
+      "type": "string"
+    },
+    "env_fp": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    },
+    "created": {
+      "type": "string"
+    }
+  }
+}

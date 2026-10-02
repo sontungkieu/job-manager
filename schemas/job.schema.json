@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eval-core job",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "case",
+    "bank_key",
+    "created"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "duy nhat; <type>__<run>__step<N>__<bench>__seed<S>"
+    },
+    "type": {
+      "enum": [
+        "gen",
+        "score-cpu",
+        "score-judge"
+      ]
+    },
+    "case": {
+      "type": "string"
+    },
+    "run": {
+      "type": "string"
+    },
+    "step": {
+      "type": "integer"
+    },
+    "benchmark": {
+      "type": "string"
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "gen_seed": {
+      "type": "integer",
+      "default": 0
+    },
+    "needs": {
+      "type": "object",
+      "properties": {
+        "gpu": {
+          "type": "integer"
+        },
+        "vram_gb": {
+          "type": "integer"
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "type": "string"
+        },
+        "cmd": {
+          "type": "string"
+        }
+      }
+    },
+    "bank_key": {
+      "type": "string",
+      "description": "sha256(model|bench|seed|contract|env_fp)"
+    },
+    "prio": {
+      "type": "integer",
+      "default": 50
+    },
+    "created": {
+      "type": "string"
+    },
+    "by": {
+      "type": "string"
+    },
+    "claimed_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "claimed_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}
