@@ -115,8 +115,13 @@ def cmd_add(a):
         for q in paths:
             name = q.name if q.name.startswith("step") else q.parent.name
             if name.startswith("step"): steps.append(int(name[4:]))
-        a.case = str(paths[0].parents[1] if not paths[0].name.startswith("step") else paths[0].parents[2])
-        a.run = (paths[0].parent if not paths[0].name.startswith("step") else paths[0].parents[1]).name
+        q0 = paths[0]
+        if q0.name.startswith("step"):      # .../train/<run>/checkpoint/stepN
+            run_dir, case_dir = q0.parents[1], q0.parents[3]
+        else:                                # .../train/<run>/checkpoint
+            run_dir, case_dir = q0.parents[0], q0.parents[2]
+        a.case = str(case_dir)
+        a.run = run_dir.name
         a.steps = ",".join(str(x) for x in sorted(set(steps)))
         print("tu --ckpt:", a.run, "steps", a.steps, "case", a.case)
     
